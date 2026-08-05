@@ -1,0 +1,23 @@
+{
+  "family":"ecommerce-task-prod",
+  "networkMode": "awsvpc",
+  "requiresCompatibilities": [
+    "FARGATE"
+  ],
+  "cpu": "256",
+  "memory": "512",
+  "executionRoleArn": "arn:aws:iam::968053437521:role/ecsTaskExecutionRole",
+  "containerDefinitions": [
+    {
+      "name": "ecommerce-api",
+      "image": "968053437521.dkr.ecr.ap-south-1.amazonaws.com/ecommerce-api:v1.0.0",
+      "essential": true,
+      "portMappings": [
+        {
+          "containerPort": 8000
+        }
+      ]
+    }
+  ]
+  
+}
