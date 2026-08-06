@@ -8,6 +8,15 @@ on:
       - production
 
   workflow_dispatch:
+    inputs:
+      environment:
+        description: "Select deployment environment"
+        required: true
+        type: choice
+        options:
+          - dev
+          - qa
+          - production
 
 env:
   AWS_REGION: ap-south-1
@@ -19,6 +28,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+
       # Checkout Repository
       - name: Checkout Source Code
         uses: actions/checkout@v4
@@ -31,71 +41,89 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
 
-      # Login to Amazon ECR
+      # Login Amazon ECR
       - name: Login to Amazon ECR
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
 
-      # Select Environment
-      - name: Select Environment
-        id: env
+      # Set Image Tag
+      - name: Set Image Tag
+        run: echo "IMAGE_TAG=${GITHUB_SHA}" >> $GITHUB_ENV
+
+      # Select Deployment Environment
+      - name: Select Deployment Environment
         run: |
-          if [ "${GITHUB_REF_NAME}" = "dev" ]; then
+
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            ENVIRONMENT="${{ github.event.inputs.environment }}"
+          else
+            ENVIRONMENT="${GITHUB_REF_NAME}"
+          fi
+
+          echo "Selected Environment = $ENVIRONMENT"
+
+          if [ "$ENVIRONMENT" = "dev" ]; then
+
             echo "SERVICE=ecommerce-dev-service" >> $GITHUB_ENV
-            echo "TASK=ecommerce-task-dev" >> $GITHUB_ENV
             echo "TASK_FILE=.github/workflows/task-definition-dev.json" >> $GITHUB_ENV
 
-          elif [ "${GITHUB_REF_NAME}" = "qa" ]; then
+          elif [ "$ENVIRONMENT" = "qa" ]; then
+
             echo "SERVICE=ecommerce-qa-service" >> $GITHUB_ENV
-            echo "TASK=ecommerce-task-qa" >> $GITHUB_ENV
             echo "TASK_FILE=.github/workflows/task-definition-qa.json" >> $GITHUB_ENV
 
-          else
+          elif [ "$ENVIRONMENT" = "production" ]; then
+
             echo "SERVICE=ecommerce-prod-service" >> $GITHUB_ENV
-            echo "TASK=ecommerce-task-prod" >> $GITHUB_ENV
             echo "TASK_FILE=.github/workflows/task-definition-prod.json" >> $GITHUB_ENV
+
+          else
+
+            echo "Invalid Environment"
+            exit 1
+
           fi
 
       # Build Docker Image
       - name: Build Docker Image
         run: |
           docker build \
-          -t $ECR_REPOSITORY:${GITHUB_SHA::7} .
+            -t $ECR_REPOSITORY:$IMAGE_TAG .
 
       # Tag Docker Image
       - name: Tag Docker Image
         run: |
           docker tag \
-          $ECR_REPOSITORY:${GITHUB_SHA::7} \
-          ${{ steps.login-ecr.outputs.registry }}/$ECR_REPOSITORY:${GITHUB_SHA::7}
+            $ECR_REPOSITORY:$IMAGE_TAG \
+            ${{ steps.login-ecr.outputs.registry }}/$ECR_REPOSITORY:$IMAGE_TAG
 
       # Push Docker Image
       - name: Push Docker Image
         run: |
           docker push \
-          ${{ steps.login-ecr.outputs.registry }}/$ECR_REPOSITORY:${GITHUB_SHA::7}
+            ${{ steps.login-ecr.outputs.registry }}/$ECR_REPOSITORY:$IMAGE_TAG
 
-      # Update Task Definition Image
-      - name: Render Task Definition
+      # Render ECS Task Definition
+      - name: Render ECS Task Definition
         id: task-def
         uses: aws-actions/amazon-ecs-render-task-definition@v1
         with:
           task-definition: ${{ env.TASK_FILE }}
           container-name: ecommerce-api
-          image: ${{ steps.login-ecr.outputs.registry }}/ecommerce-api:${GITHUB_SHA::7}
+          image: ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ env.IMAGE_TAG }}
 
-      # Deploy to ECS
+      # Deploy ECS Service
       - name: Deploy to Amazon ECS
         uses: aws-actions/amazon-ecs-deploy-task-definition@v2
         with:
           task-definition: ${{ steps.task-def.outputs.task-definition }}
           service: ${{ env.SERVICE }}
-          cluster: ecommerce-cluster
+          cluster: ${{ env.ECS_CLUSTER }}
           wait-for-service-stability: true
 
       # Verify Deployment
       - name: Verify Deployment
         run: |
           aws ecs describe-services \
-          --cluster ecommerce-cluster \
-          --services $SERVICE
+            --cluster $ECS_CLUSTER \
+            --services $SERVICE
