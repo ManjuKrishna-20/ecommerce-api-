@@ -10,7 +10,7 @@ on:
   workflow_dispatch:
     inputs:
       environment:
-        description: "Select deployment environment"
+        description: "Deployment Environment"
         required: true
         type: choice
         options:
@@ -22,18 +22,18 @@ env:
   AWS_REGION: ap-south-1
   ECR_REPOSITORY: ecommerce-api
   ECS_CLUSTER: ecommerce-cluster
+  CONTAINER_NAME: ecommerce-api
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
 
-    steps:
+    environment: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.environment || github.ref_name }}
 
-      # Checkout Repository
-      - name: Checkout Source Code
+    steps:
+      - name: Checkout Code
         uses: actions/checkout@v4
 
-      # Configure AWS Credentials
       - name: Configure AWS Credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -41,79 +41,63 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
 
-      # Login Amazon ECR
       - name: Login to Amazon ECR
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
 
-      # Set Image Tag
-      - name: Set Image Tag
-        run: echo "IMAGE_TAG=${GITHUB_SHA}" >> $GITHUB_ENV
-
-      # Select Deployment Environment
-      - name: Select Deployment Environment
+      - name: Set Environment
         run: |
-
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            ENVIRONMENT="${{ github.event.inputs.environment }}"
+            ENV=${{ github.event.inputs.environment }}
           else
-            ENVIRONMENT="${GITHUB_REF_NAME}"
+            ENV=${GITHUB_REF_NAME}
           fi
 
-          echo "Selected Environment = $ENVIRONMENT"
+          echo "IMAGE_TAG=${GITHUB_SHA}" >> $GITHUB_ENV
 
-          if [ "$ENVIRONMENT" = "dev" ]; then
+          case $ENV in
+            dev)
+              echo "SERVICE=ecommerce-dev-service" >> $GITHUB_ENV
+              echo "TASK=.github/workflows/task-definition-dev.json" >> $GITHUB_ENV
+              ;;
+            qa)
+              echo "SERVICE=ecommerce-qa-service" >> $GITHUB_ENV
+              echo "TASK=.github/workflows/task-definition-qa.json" >> $GITHUB_ENV
+              ;;
+            production)
+              echo "SERVICE=ecommerce-prod-service" >> $GITHUB_ENV
+              echo "TASK=.github/workflows/task-definition-prod.json" >> $GITHUB_ENV
+              ;;
+            *)
+              echo "Invalid Environment"
+              exit 1
+              ;;
+          esac
 
-            echo "SERVICE=ecommerce-dev-service" >> $GITHUB_ENV
-            echo "TASK_FILE=.github/workflows/task-definition-dev.json" >> $GITHUB_ENV
-
-          elif [ "$ENVIRONMENT" = "qa" ]; then
-
-            echo "SERVICE=ecommerce-qa-service" >> $GITHUB_ENV
-            echo "TASK_FILE=.github/workflows/task-definition-qa.json" >> $GITHUB_ENV
-
-          elif [ "$ENVIRONMENT" = "production" ]; then
-
-            echo "SERVICE=ecommerce-prod-service" >> $GITHUB_ENV
-            echo "TASK_FILE=.github/workflows/task-definition-prod.json" >> $GITHUB_ENV
-
-          else
-
-            echo "Invalid Environment"
-            exit 1
-
-          fi
-
-      # Build Docker Image
       - name: Build Docker Image
         run: |
-          docker build \
-            -t $ECR_REPOSITORY:$IMAGE_TAG .
+          docker build -t $ECR_REPOSITORY:$IMAGE_TAG .
 
-      # Tag Docker Image
       - name: Tag Docker Image
         run: |
           docker tag \
-            $ECR_REPOSITORY:$IMAGE_TAG \
-            ${{ steps.login-ecr.outputs.registry }}/$ECR_REPOSITORY:$IMAGE_TAG
+          $ECR_REPOSITORY:$IMAGE_TAG \
+          ${{ steps.login-ecr.outputs.registry }}/$ECR_REPOSITORY:$IMAGE_TAG
 
-      # Push Docker Image
       - name: Push Docker Image
         run: |
           docker push \
-            ${{ steps.login-ecr.outputs.registry }}/$ECR_REPOSITORY:$IMAGE_TAG
+          ${{ steps.login-ecr.outputs.registry }}/$ECR_REPOSITORY:$IMAGE_TAG
 
-      # Render ECS Task Definition
-      - name: Render ECS Task Definition
+      - name: Render Task Definition
         id: task-def
         uses: aws-actions/amazon-ecs-render-task-definition@v1
         with:
-          task-definition: ${{ env.TASK_FILE }}
-          container-name: ecommerce-api
+          task-definition: ${{ env.TASK }}
+          container-name: ${{ env.CONTAINER_NAME }}
           image: ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ env.IMAGE_TAG }}
 
-      # Deploy ECS Service
-      - name: Deploy to Amazon ECS
+      - name: Deploy to ECS
         uses: aws-actions/amazon-ecs-deploy-task-definition@v2
         with:
           task-definition: ${{ steps.task-def.outputs.task-definition }}
@@ -121,7 +105,6 @@ jobs:
           cluster: ${{ env.ECS_CLUSTER }}
           wait-for-service-stability: true
 
-      # Verify Deployment
       - name: Verify Deployment
         run: |
           aws ecs describe-services \
