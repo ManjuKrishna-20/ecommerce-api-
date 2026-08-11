@@ -55,17 +55,17 @@ jobs:
 
     steps:
 
-      # ==================================================
+      # ============================================================
       # 1. CHECKOUT
-      # ==================================================
+      # ============================================================
 
       - name: Checkout Repository
         uses: actions/checkout@v4
 
 
-      # ==================================================
-      # 2. AWS LOGIN
-      # ==================================================
+      # ============================================================
+      # 2. CONFIGURE AWS CREDENTIALS
+      # ============================================================
 
       - name: Configure AWS Credentials
         uses: aws-actions/configure-aws-credentials@v4
@@ -75,18 +75,18 @@ jobs:
           aws-region: ${{ env.AWS_REGION }}
 
 
-      # ==================================================
-      # 3. LOGIN TO ECR
-      # ==================================================
+      # ============================================================
+      # 3. LOGIN TO AMAZON ECR
+      # ============================================================
 
       - name: Login to Amazon ECR
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
 
 
-      # ==================================================
+      # ============================================================
       # 4. SELECT ENVIRONMENT
-      # ==================================================
+      # ============================================================
 
       - name: Select Environment
         run: |
@@ -122,9 +122,9 @@ jobs:
           echo "======================================"
 
 
-      # ==================================================
+      # ============================================================
       # 5. SELECT ECR + ECS RESOURCES
-      # ==================================================
+      # ============================================================
 
       - name: Select Deployment Resources
         run: |
@@ -154,14 +154,17 @@ jobs:
 
           fi
 
-          echo "ECR Repository : $ECR_REPOSITORY"
-          echo "ECS Service    : $ECS_SERVICE"
-          echo "Task Definition: $TASK_DEFINITION"
+          echo "======================================"
+          echo "Environment     : $DEPLOY_ENV"
+          echo "ECR Repository  : $ECR_REPOSITORY"
+          echo "ECS Service     : $ECS_SERVICE"
+          echo "Task Definition : $TASK_DEFINITION"
+          echo "======================================"
 
 
-      # ==================================================
+      # ============================================================
       # 6. NORMAL DEPLOYMENT - GENERATE IMAGE TAG
-      # ==================================================
+      # ============================================================
 
       - name: Generate Image Tag
         if: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.action == 'deploy' }}
@@ -184,9 +187,9 @@ jobs:
           echo "======================================"
 
 
-      # ==================================================
+      # ============================================================
       # 7. BUILD DOCKER IMAGE
-      # ==================================================
+      # ============================================================
 
       - name: Build Docker Image
         if: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.action == 'deploy' }}
@@ -195,10 +198,12 @@ jobs:
           docker build \
             -t "$ECR_REPOSITORY:$IMAGE_TAG" .
 
+          echo "Docker image built successfully."
 
-      # ==================================================
+
+      # ============================================================
       # 8. TAG DOCKER IMAGE
-      # ==================================================
+      # ============================================================
 
       - name: Tag Docker Image
         if: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.action == 'deploy' }}
@@ -208,22 +213,58 @@ jobs:
             "$ECR_REPOSITORY:$IMAGE_TAG" \
             "${{ steps.login-ecr.outputs.registry }}/$ECR_REPOSITORY:$IMAGE_TAG"
 
+          echo "Docker image tagged successfully."
 
-      # ==================================================
+
+      # ============================================================
       # 9. PUSH IMAGE TO ECR
-      # ==================================================
+      # ============================================================
 
       - name: Push Docker Image
         if: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.action == 'deploy' }}
         run: |
 
-          docker push \
-            "${{ steps.login-ecr.outputs.registry }}/$ECR_REPOSITORY:$IMAGE_TAG"
+          IMAGE_URI="${{ steps.login-ecr.outputs.registry }}/${ECR_REPOSITORY}:${IMAGE_TAG}"
+
+          echo "======================================"
+          echo "PUSHING DOCKER IMAGE"
+          echo "======================================"
+          echo "Repository : $ECR_REPOSITORY"
+          echo "Image Tag  : $IMAGE_TAG"
+          echo "Image URI  : $IMAGE_URI"
+          echo "======================================"
+
+          docker push "$IMAGE_URI"
 
 
-      # ==================================================
-      # 10. GET CURRENT IMAGE FROM ECS
-      # ==================================================
+      # ============================================================
+      # 10. SHOW LATEST 5 ECR IMAGES
+      # ============================================================
+
+      - name: Show Latest 5 ECR Images
+        if: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.action == 'deploy' }}
+        run: |
+
+          echo "======================================"
+          echo "LATEST 5 ECR IMAGES"
+          echo "======================================"
+          echo "Environment : $DEPLOY_ENV"
+          echo "Repository  : $ECR_REPOSITORY"
+          echo "======================================"
+
+          aws ecr describe-images \
+            --repository-name "$ECR_REPOSITORY" \
+            --region "$AWS_REGION" \
+            --filter tagStatus=TAGGED \
+            --query 'reverse(sort_by(imageDetails[?imageTags != null], &imagePushedAt))[:5].[imageTags[0], imagePushedAt]' \
+            --output table
+
+          echo "======================================"
+
+
+      # ============================================================
+      # 11. GET CURRENT ECS IMAGE FOR ROLLBACK
+      # ============================================================
 
       - name: Get Current ECS Image
         if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.action == 'rollback' }}
@@ -258,7 +299,6 @@ jobs:
           echo "CURRENT_IMAGE=$CURRENT_IMAGE" >> "$GITHUB_ENV"
           echo "CURRENT_TAG=$CURRENT_TAG" >> "$GITHUB_ENV"
 
-          echo ""
           echo "======================================"
           echo "CURRENT DEPLOYED IMAGE"
           echo "======================================"
@@ -267,9 +307,9 @@ jobs:
           echo "======================================"
 
 
-      # ==================================================
-      # 11. GET PREVIOUS 5 IMAGES
-      # ==================================================
+      # ============================================================
+      # 12. GET PREVIOUS 5 ROLLBACK IMAGES
+      # ============================================================
 
       - name: Get Previous 5 Rollback Images
         if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.action == 'rollback' }}
@@ -283,7 +323,6 @@ jobs:
             --filter tagStatus=TAGGED \
             --output json > all-images.json
 
-          echo ""
           echo "======================================"
           echo "AVAILABLE ROLLBACK BUILDS"
           echo "======================================"
@@ -317,9 +356,9 @@ jobs:
           echo "======================================"
 
 
-      # ==================================================
-      # 12. SELECT ROLLBACK IMAGE
-      # ==================================================
+      # ============================================================
+      # 13. SELECT ROLLBACK IMAGE
+      # ============================================================
 
       - name: Select Rollback Image
         if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.action == 'rollback' }}
@@ -354,22 +393,25 @@ jobs:
 
           esac
 
-          IMAGE_TAG=$(jq -r --arg CURRENT_TAG "$CURRENT_TAG" --argjson INDEX "$INDEX" '
-            [
-              .imageDetails[]
-              | select(.imageTags != null)
-              | select(.imageTags | length > 0)
-              | .imageTags[0] as $tag
-              | select($tag != $CURRENT_TAG)
-              | {
-                  tag: $tag,
-                  pushedAt: .imagePushedAt
-                }
-            ]
-            | sort_by(.pushedAt)
-            | reverse
-            | .[$INDEX].tag
-          ' all-images.json)
+          IMAGE_TAG=$(jq -r \
+            --arg CURRENT_TAG "$CURRENT_TAG" \
+            --argjson INDEX "$INDEX" \
+            '
+              [
+                .imageDetails[]
+                | select(.imageTags != null)
+                | select(.imageTags | length > 0)
+                | .imageTags[0] as $tag
+                | select($tag != $CURRENT_TAG)
+                | {
+                    tag: $tag,
+                    pushedAt: .imagePushedAt
+                  }
+              ]
+              | sort_by(.pushedAt)
+              | reverse
+              | .[$INDEX].tag
+            ' all-images.json)
 
           if [ "$IMAGE_TAG" = "null" ] || [ -z "$IMAGE_TAG" ]; then
             echo "Selected rollback image does not exist."
@@ -381,7 +423,6 @@ jobs:
           echo "IMAGE_TAG=$IMAGE_TAG" >> "$GITHUB_ENV"
           echo "IMAGE_URI=$IMAGE_URI" >> "$GITHUB_ENV"
 
-          echo ""
           echo "======================================"
           echo "ROLLBACK IMAGE SELECTED"
           echo "======================================"
@@ -392,9 +433,9 @@ jobs:
           echo "======================================"
 
 
-      # ==================================================
-      # 13. SHOW VERSION + BUILD INFORMATION
-      # ==================================================
+      # ============================================================
+      # 14. SHOW FINAL IMAGE INFORMATION
+      # ============================================================
 
       - name: Show Selected Image Information
         run: |
@@ -421,9 +462,9 @@ jobs:
           echo "======================================"
 
 
-      # ==================================================
-      # 14. RENDER ECS TASK DEFINITION
-      # ==================================================
+      # ============================================================
+      # 15. RENDER ECS TASK DEFINITION
+      # ============================================================
 
       - name: Render ECS Task Definition
         id: task-def
@@ -434,9 +475,9 @@ jobs:
           image: ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ env.IMAGE_TAG }}
 
 
-      # ==================================================
-      # 15. DEPLOY TO ECS
-      # ==================================================
+      # ============================================================
+      # 16. DEPLOY TO ECS
+      # ============================================================
 
       - name: Deploy to Amazon ECS
         uses: aws-actions/amazon-ecs-deploy-task-definition@v2
@@ -447,9 +488,9 @@ jobs:
           wait-for-service-stability: true
 
 
-      # ==================================================
-      # 16. VERIFY ECS DEPLOYMENT
-      # ==================================================
+      # ============================================================
+      # 17. VERIFY ECS DEPLOYMENT
+      # ============================================================
 
       - name: Verify ECS Deployment
         run: |
