@@ -1,16 +1,26 @@
-name: Ecommerce Multi-Environment Deployment
+name: Ecommerce Multi-Environment AWS Deployment
 
 on:
+
+  # ============================================================
+  # AUTOMATIC DEPLOYMENT
+  # ============================================================
+
   push:
     branches:
       - dev
       - qa
-      - production
+      - main
+
+  # ============================================================
+  # MANUAL DEPLOYMENT
+  # ============================================================
 
   workflow_dispatch:
     inputs:
+
       environment:
-        description: "Select deployment environment"
+        description: "Select target environment"
         required: true
         type: choice
         options:
@@ -18,362 +28,793 @@ on:
           - qa
           - prod
 
+      deploy_tag:
+        description: "Select deployment type"
+        required: true
+        type: choice
+        options:
+          - latest
+          - latest-1
+          - latest-2
+          - latest-3
+          - latest-4
+
+
+# ==============================================================
+# PERMISSIONS
+# ==============================================================
+
 permissions:
   contents: read
 
+
+# ==============================================================
+# GLOBAL AWS CONFIGURATION
+# ==============================================================
+
 env:
+
   AWS_REGION: ap-south-1
+
   ECS_CLUSTER: ecommerce-cluster
+
   CONTAINER_NAME: ecommerce-api
 
+
+# ==============================================================
+# DEPLOY JOB
+# ==============================================================
+
 jobs:
+
   deploy:
 
     runs-on: ubuntu-latest
 
-    # ============================================================
-    # Select GitHub Environment
-    # ============================================================
-    environment: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.environment || (github.ref_name == 'production' && 'prod' || github.ref_name) }}
+
+    # GitHub Environment
+    environment: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.environment || (github.ref_name == 'main' && 'prod' || github.ref_name) }}
+
 
     steps:
 
-      # ============================================================
-      # 1. Checkout Source Code
-      # ============================================================
+      # ========================================================
+      # 1. CHECKOUT
+      # ========================================================
+
       - name: Checkout Repository
+
         uses: actions/checkout@v4
 
 
-      # ============================================================
-      # 2. Configure AWS Credentials
-      # ============================================================
+      # ========================================================
+      # 2. CONFIGURE AWS CREDENTIALS
+      # ========================================================
+
       - name: Configure AWS Credentials
+
         uses: aws-actions/configure-aws-credentials@v4
+
         with:
+
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+
           aws-region: ${{ env.AWS_REGION }}
 
 
-      # ============================================================
-      # 3. Login to Amazon ECR
-      # ============================================================
+      # ========================================================
+      # 3. LOGIN TO AMAZON ECR
+      # ========================================================
+
       - name: Login to Amazon ECR
+
         id: login-ecr
+
         uses: aws-actions/amazon-ecr-login@v2
 
 
-      # ============================================================
-      # 4. Select Deployment Environment
-      # ============================================================
-      - name: Select Environment
+      # ========================================================
+      # 4. DECIDE ENVIRONMENT
+      # ========================================================
+
+      - name: Decide Environment
+
         shell: bash
+
         run: |
 
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
 
-            ENVIRONMENT="${{ github.event.inputs.environment }}"
+            ENV="${{ github.event.inputs.environment }}"
 
           else
 
             BRANCH="${GITHUB_REF_NAME}"
 
             if [ "$BRANCH" = "dev" ]; then
-              ENVIRONMENT="dev"
+
+              ENV="dev"
 
             elif [ "$BRANCH" = "qa" ]; then
-              ENVIRONMENT="qa"
 
-            elif [ "$BRANCH" = "production" ]; then
-              ENVIRONMENT="prod"
+              ENV="qa"
+
+            elif [ "$BRANCH" = "main" ]; then
+
+              ENV="prod"
 
             else
-              echo "Invalid branch: $BRANCH"
+
+              echo "ERROR: Unsupported branch: $BRANCH"
+
               exit 1
+
             fi
 
           fi
 
-          echo "DEPLOY_ENV=$ENVIRONMENT" >> "$GITHUB_ENV"
 
-          echo "=============================================="
-          echo "SELECTED ENVIRONMENT"
-          echo "=============================================="
-          echo "Environment : $ENVIRONMENT"
+          case "$ENV" in
+
+            dev|qa|prod)
+              ;;
+
+            *)
+              echo "ERROR: Unsupported environment: $ENV"
+              exit 1
+              ;;
+
+          esac
+
+
+          echo "DEPLOY_ENV=$ENV" >> "$GITHUB_ENV"
+
+
+          echo "=========================================="
+          echo "DEPLOYMENT ENVIRONMENT"
+          echo "=========================================="
+
+          echo "Environment : $ENV"
           echo "Branch      : $GITHUB_REF_NAME"
           echo "Event       : ${{ github.event_name }}"
-          echo "=============================================="
+
+          echo "=========================================="
 
 
-      # ============================================================
-      # 5. Select ECR Repository / ECS Service / Task Definition
-      # ============================================================
-      - name: Select Deployment Resources
+      # ========================================================
+      # 5. SELECT ECR + ECS RESOURCES
+      # ========================================================
+
+      - name: Select AWS Deployment Resources
+
         shell: bash
+
         run: |
 
           if [ "$DEPLOY_ENV" = "dev" ]; then
 
             echo "ECR_REPOSITORY=ecommerce-api-dev" >> "$GITHUB_ENV"
+
             echo "ECS_SERVICE=ecommerce-dev-service" >> "$GITHUB_ENV"
+
             echo "TASK_DEFINITION=.github/workflows/task-definition-dev.json" >> "$GITHUB_ENV"
+
 
           elif [ "$DEPLOY_ENV" = "qa" ]; then
 
             echo "ECR_REPOSITORY=ecommerce-api-qa" >> "$GITHUB_ENV"
+
             echo "ECS_SERVICE=ecommerce-qa-service" >> "$GITHUB_ENV"
+
             echo "TASK_DEFINITION=.github/workflows/task-definition-qa.json" >> "$GITHUB_ENV"
+
 
           elif [ "$DEPLOY_ENV" = "prod" ]; then
 
             echo "ECR_REPOSITORY=ecommerce-api-prod" >> "$GITHUB_ENV"
+
             echo "ECS_SERVICE=ecommerce-prod-service" >> "$GITHUB_ENV"
+
             echo "TASK_DEFINITION=.github/workflows/task-definition-prod.json" >> "$GITHUB_ENV"
+
 
           else
 
-            echo "Invalid deployment environment"
+            echo "ERROR: Invalid environment"
+
             exit 1
 
           fi
 
-          echo "=============================================="
-          echo "DEPLOYMENT RESOURCES"
-          echo "=============================================="
+
+          echo "=========================================="
+          echo "AWS DEPLOYMENT RESOURCES"
+          echo "=========================================="
+
           echo "Environment     : $DEPLOY_ENV"
           echo "ECR Repository  : $ECR_REPOSITORY"
+          echo "ECS Cluster     : $ECS_CLUSTER"
           echo "ECS Service     : $ECS_SERVICE"
           echo "Task Definition : $TASK_DEFINITION"
-          echo "=============================================="
+
+          echo "=========================================="
 
 
-      # ============================================================
-      # 6. Generate Docker Image Tag
+      # ========================================================
+      # 6. SHOW ALL EXISTING ECR IMAGES
       #
-      # Format:
-      #
-      # dev-20260811-1359-b22
-      # qa-20260811-1222-b19
-      # prod-20260811-1430-b25
-      #
-      # ============================================================
-      - name: Generate Image Tag
+      # Nothing is deleted.
+      # ========================================================
+
+      - name: Show All Existing ECR Images
+
         shell: bash
+
         run: |
 
-          BUILD_NUMBER="${GITHUB_RUN_NUMBER}"
+          echo "=========================================="
+          echo "ALL EXISTING ECR IMAGES"
+          echo "=========================================="
 
-          DATE=$(date -u +"%Y%m%d")
-          TIME=$(date -u +"%H%M")
+          echo "Repository: $ECR_REPOSITORY"
 
-          IMAGE_TAG="${DEPLOY_ENV}-${DATE}-${TIME}-b${BUILD_NUMBER}"
-
-          echo "BUILD_NUMBER=$BUILD_NUMBER" >> "$GITHUB_ENV"
-          echo "BUILD_DATE=$DATE" >> "$GITHUB_ENV"
-          echo "BUILD_TIME=$TIME" >> "$GITHUB_ENV"
-          echo "IMAGE_TAG=$IMAGE_TAG" >> "$GITHUB_ENV"
-
-          echo "=============================================="
-          echo "DOCKER IMAGE TAG"
-          echo "=============================================="
-          echo "Environment : $DEPLOY_ENV"
-          echo "Date        : $DATE"
-          echo "Time        : $TIME"
-          echo "Build       : $BUILD_NUMBER"
-          echo "Image Tag   : $IMAGE_TAG"
-          echo "=============================================="
+          echo "=========================================="
 
 
-      # ============================================================
-      # 7. Build Docker Image
-      # ============================================================
-      - name: Build Docker Image
-        shell: bash
-        run: |
-
-          echo "=============================================="
-          echo "BUILDING DOCKER IMAGE"
-          echo "=============================================="
-
-          docker build \
-            -t "$ECR_REPOSITORY:$IMAGE_TAG" .
-
-          echo "Docker image built successfully."
-
-          echo "=============================================="
-          echo "Repository : $ECR_REPOSITORY"
-          echo "Image Tag  : $IMAGE_TAG"
-          echo "=============================================="
+          aws ecr describe-images \
+            --repository-name "$ECR_REPOSITORY" \
+            --region "$AWS_REGION" \
+            --query 'reverse(sort_by(imageDetails[?imageTags != null], &imagePushedAt))[].[imageTags[0], imagePushedAt, imageDigest]' \
+            --output table
 
 
-      # ============================================================
-      # 8. Tag Docker Image for ECR
-      # ============================================================
-      - name: Tag Docker Image
-        shell: bash
-        run: |
-
-          ECR_REGISTRY="${{ steps.login-ecr.outputs.registry }}"
-
-          docker tag \
-            "$ECR_REPOSITORY:$IMAGE_TAG" \
-            "$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
-
-          echo "=============================================="
-          echo "DOCKER IMAGE TAGGED"
-          echo "=============================================="
-          echo "Image URI:"
-          echo "$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
-          echo "=============================================="
-
-
-      # ============================================================
-      # 9. Push Docker Image to ECR
-      # ============================================================
-      - name: Push Docker Image
-        shell: bash
-        run: |
-
-          ECR_REGISTRY="${{ steps.login-ecr.outputs.registry }}"
-
-          IMAGE_URI="$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
-
-          echo "=============================================="
-          echo "PUSHING DOCKER IMAGE"
-          echo "=============================================="
-          echo "Repository : $ECR_REPOSITORY"
-          echo "Image Tag  : $IMAGE_TAG"
-          echo "Image URI  : $IMAGE_URI"
-          echo "=============================================="
-
-          docker push "$IMAGE_URI"
-
-          echo "Docker image pushed successfully."
-
-
-      # ============================================================
-      # 10. Show Current Image Information
-      # ============================================================
-      - name: Show Image Information
-        shell: bash
-        run: |
-
-          ECR_REGISTRY="${{ steps.login-ecr.outputs.registry }}"
-
-          IMAGE_URI="$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
-
-          echo "=============================================="
-          echo "DEPLOYMENT IMAGE INFORMATION"
-          echo "=============================================="
-          echo "Environment : $DEPLOY_ENV"
-          echo "Repository  : $ECR_REPOSITORY"
-          echo "Image Tag   : $IMAGE_TAG"
-          echo "Build       : $BUILD_NUMBER"
-          echo "Date        : $BUILD_DATE"
-          echo "Time        : $BUILD_TIME"
-          echo "Image URI   : $IMAGE_URI"
-          echo "=============================================="
-
-
-      # ============================================================
-      # 11. Show Latest 5 NEW-FORMAT Builds
+      # ========================================================
+      # 7. GET ONLY NEW FORMAT BUILDS
       #
-      # IMPORTANT:
+      # Expected:
       #
-      # This ignores old images such as:
+      # dev-v1.0-20260811-135932-b22
+      # dev-v1.0-20260811-124720-b21
+      # dev-v1.0-20260811-123500-b20
       #
-      # v1.0.5-dev-b5
-      # v1.0.20-dev-b20
-      #
-      # and only displays:
-      #
-      # dev-YYYYMMDD-HHMM-bBUILD
-      #
-      # ============================================================
+      # Old tags are ignored.
+      # ========================================================
+
       - name: Show Latest 5 Builds
+
         shell: bash
+
         run: |
 
-          echo "=============================================="
+          echo "=========================================="
           echo "LATEST 5 BUILDS"
-          echo "=============================================="
+          echo "=========================================="
+
           echo "Environment : $DEPLOY_ENV"
           echo "Repository  : $ECR_REPOSITORY"
-          echo "=============================================="
+
+          echo "=========================================="
+
 
           aws ecr describe-images \
             --repository-name "$ECR_REPOSITORY" \
             --region "$AWS_REGION" \
             --output json > ecr-images.json
 
+
           jq -r \
             --arg ENV "$DEPLOY_ENV" '
-              [
-                .imageDetails[]
-                | select(.imageTags != null)
-                | . as $image
-                | $image.imageTags[]
-                | select(startswith($ENV + "-"))
-                | {
-                    tag: .,
-                    pushedAt: $image.imagePushedAt
-                  }
-              ]
-              | sort_by(.pushedAt)
-              | reverse
-              | .[:5]
-              | .[]
-              | [.tag, .pushedAt]
-              | @tsv
-            ' ecr-images.json \
-            | awk 'BEGIN {
-                printf "%-35s %-30s\n", "IMAGE TAG", "PUSHED AT"
-                printf "%-35s %-30s\n", "-----------------------------------", "------------------------------"
-              }
-              {
-                printf "%-35s %-30s\n", $1, $2
-              }'
 
-          echo "=============================================="
-          echo "Latest 5 builds displayed successfully."
-          echo "=============================================="
+            [
+              .imageDetails[]
+
+              | select(.imageTags != null)
+
+              | . as $image
+
+              | $image.imageTags[]
+
+              | select(
+                  test(
+                    "^" + $ENV +
+                    "-v[0-9]+\\.[0-9]+-[0-9]{8}-[0-9]{6}-b[0-9]+$"
+                  )
+                )
+
+              | {
+                  tag: .,
+                  pushedAt: $image.imagePushedAt,
+                  build: (
+                    capture("-b(?<number>[0-9]+)$").number
+                    | tonumber
+                  )
+                }
+
+            ]
+
+            | sort_by(.build)
+
+            | reverse
+
+            | .[:5]
+
+            | .[]
+
+            | "\(.tag) | Build b\(.build) | \(.pushedAt)"
+            ' ecr-images.json
 
 
-      # ============================================================
-      # 12. Render ECS Task Definition
-      # ============================================================
+          echo "=========================================="
+
+
+      # ========================================================
+      # 8. DETERMINE DEPLOYMENT MODE
+      #
+      # PUSH:
+      #   Always creates NEW image.
+      #
+      # MANUAL latest:
+      #   Creates NEW image.
+      #
+      # MANUAL latest-1/-2/-3/-4:
+      #   Uses EXISTING image.
+      # ========================================================
+
+      - name: Generate or Select Image
+
+        shell: bash
+
+        run: |
+
+          VERSION="1.0"
+
+          PREFIX="${DEPLOY_ENV}-v${VERSION}-"
+
+
+          echo "=========================================="
+          echo "IMAGE SELECTION"
+          echo "=========================================="
+
+          echo "Environment : $DEPLOY_ENV"
+          echo "Version     : $VERSION"
+          echo "Prefix      : $PREFIX"
+
+          echo "=========================================="
+
+
+          # ====================================================
+          # AUTOMATIC DEPLOYMENT
+          # ====================================================
+
+          if [ "${{ github.event_name }}" = "push" ]; then
+
+            echo "Automatic deployment detected."
+
+            echo "Creating NEW image."
+
+
+            BUILD_NUMBER="${GITHUB_RUN_NUMBER}"
+
+            DATE=$(date -u +"%Y%m%d")
+
+            TIME=$(date -u +"%H%M%S")
+
+
+            IMAGE_TAG="${DEPLOY_ENV}-v${VERSION}-${DATE}-${TIME}-b${BUILD_NUMBER}"
+
+
+            echo "IMAGE_TAG=$IMAGE_TAG" >> "$GITHUB_ENV"
+
+            echo "BUILD_NEW_IMAGE=true" >> "$GITHUB_ENV"
+
+
+            echo "=========================================="
+            echo "NEW IMAGE"
+            echo "=========================================="
+
+            echo "Build Number : $BUILD_NUMBER"
+            echo "Date         : $DATE"
+            echo "Time         : $TIME"
+            echo "Image Tag    : $IMAGE_TAG"
+
+            echo "=========================================="
+
+
+          # ====================================================
+          # MANUAL DEPLOYMENT
+          # ====================================================
+
+          else
+
+            SELECTED_TAG="${{ github.event.inputs.deploy_tag }}"
+
+
+            echo "Manual deployment selected."
+
+            echo "Selected option: $SELECTED_TAG"
+
+
+            # ==================================================
+            # MANUAL latest
+            #
+            # latest = NEW BUILD
+            # ==================================================
+
+            if [ "$SELECTED_TAG" = "latest" ]; then
+
+              echo "latest selected."
+
+              echo "Creating NEW image."
+
+
+              BUILD_NUMBER="${GITHUB_RUN_NUMBER}"
+
+              DATE=$(date -u +"%Y%m%d")
+
+              TIME=$(date -u +"%H%M%S")
+
+
+              IMAGE_TAG="${DEPLOY_ENV}-v${VERSION}-${DATE}-${TIME}-b${BUILD_NUMBER}"
+
+
+              echo "IMAGE_TAG=$IMAGE_TAG" >> "$GITHUB_ENV"
+
+              echo "BUILD_NEW_IMAGE=true" >> "$GITHUB_ENV"
+
+
+              echo "=========================================="
+              echo "NEW MANUAL BUILD"
+              echo "=========================================="
+
+              echo "Build Number : $BUILD_NUMBER"
+              echo "Date         : $DATE"
+              echo "Time         : $TIME"
+              echo "Image Tag    : $IMAGE_TAG"
+
+              echo "=========================================="
+
+
+            # ==================================================
+            # MANUAL latest-1 / latest-2 / latest-3 / latest-4
+            #
+            # EXISTING IMAGE
+            # ==================================================
+
+            else
+
+              case "$SELECTED_TAG" in
+
+                latest-1)
+                  INDEX=1
+                  ;;
+
+                latest-2)
+                  INDEX=2
+                  ;;
+
+                latest-3)
+                  INDEX=3
+                  ;;
+
+                latest-4)
+                  INDEX=4
+                  ;;
+
+                *)
+                  echo "ERROR: Invalid deployment tag."
+                  exit 1
+                  ;;
+
+              esac
+
+
+              echo "Rollback index: $INDEX"
+
+
+              # Get all matching new-format images
+
+              aws ecr describe-images \
+                --repository-name "$ECR_REPOSITORY" \
+                --region "$AWS_REGION" \
+                --output json > rollback-images.json
+
+
+              SORTED_TAGS=$(jq -r \
+                --arg ENV "$DEPLOY_ENV" '
+
+                [
+                  .imageDetails[]
+
+                  | select(.imageTags != null)
+
+                  | . as $image
+
+                  | $image.imageTags[]
+
+                  | select(
+                      test(
+                        "^" + $ENV +
+                        "-v[0-9]+\\.[0-9]+-[0-9]{8}-[0-9]{6}-b[0-9]+$"
+                      )
+                    )
+
+                  | {
+                      tag: .,
+                      build: (
+                        capture("-b(?<number>[0-9]+)$").number
+                        | tonumber
+                      )
+                    }
+
+                ]
+
+                | unique_by(.tag)
+
+                | sort_by(.build)
+
+                | reverse
+
+                | map(.tag)
+
+                ' rollback-images.json)
+
+
+              echo "=========================================="
+              echo "AVAILABLE BUILDS"
+              echo "=========================================="
+
+              echo "$SORTED_TAGS"
+
+              echo "=========================================="
+
+
+              IMAGE_TAG=$(echo "$SORTED_TAGS" | jq -r ".[$INDEX]")
+
+
+              if [ "$IMAGE_TAG" = "null" ] || [ -z "$IMAGE_TAG" ]; then
+
+                echo "ERROR: Requested existing image does not exist."
+
+                echo "Requested: $SELECTED_TAG"
+
+                echo "Available images:"
+
+                echo "$SORTED_TAGS"
+
+                exit 1
+
+              fi
+
+
+              echo "=========================================="
+              echo "EXISTING IMAGE SELECTED"
+              echo "=========================================="
+
+              echo "Selection : $SELECTED_TAG"
+              echo "Image     : $IMAGE_TAG"
+
+              echo "=========================================="
+
+
+              echo "IMAGE_TAG=$IMAGE_TAG" >> "$GITHUB_ENV"
+
+              echo "BUILD_NEW_IMAGE=false" >> "$GITHUB_ENV"
+
+            fi
+
+          fi
+
+
+      # ========================================================
+      # 9. BUILD DOCKER IMAGE
+      #
+      # Only NEW image.
+      # ========================================================
+
+      - name: Build Docker Image
+
+        if: env.BUILD_NEW_IMAGE == 'true'
+
+        shell: bash
+
+        run: |
+
+          ECR_REGISTRY="${{ steps.login-ecr.outputs.registry }}"
+
+          FULL_IMAGE="$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
+
+
+          echo "=========================================="
+          echo "BUILDING DOCKER IMAGE"
+          echo "=========================================="
+
+          echo "Image: $FULL_IMAGE"
+
+
+          docker build \
+            -t "$FULL_IMAGE" \
+            .
+
+
+          echo "Docker image build completed."
+
+
+      # ========================================================
+      # 10. PUSH DOCKER IMAGE
+      #
+      # Only NEW image.
+      # ========================================================
+
+      - name: Push Docker Image
+
+        if: env.BUILD_NEW_IMAGE == 'true'
+
+        shell: bash
+
+        run: |
+
+          ECR_REGISTRY="${{ steps.login-ecr.outputs.registry }}"
+
+          FULL_IMAGE="$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
+
+
+          echo "=========================================="
+          echo "PUSHING IMAGE TO ECR"
+          echo "=========================================="
+
+          echo "Repository : $ECR_REPOSITORY"
+          echo "Image Tag  : $IMAGE_TAG"
+          echo "Image      : $FULL_IMAGE"
+
+
+          docker push "$FULL_IMAGE"
+
+
+          echo "=========================================="
+          echo "IMAGE PUSH SUCCESSFUL"
+          echo "=========================================="
+
+
+      # ========================================================
+      # 11. VALIDATE EXISTING IMAGE
+      #
+      # Runs for latest-1 through latest-4.
+      # ========================================================
+
+      - name: Validate Existing Image
+
+        if: env.BUILD_NEW_IMAGE == 'false'
+
+        shell: bash
+
+        run: |
+
+          echo "=========================================="
+          echo "VALIDATING EXISTING ECR IMAGE"
+          echo "=========================================="
+
+
+          echo "Repository : $ECR_REPOSITORY"
+          echo "Image Tag  : $IMAGE_TAG"
+
+
+          aws ecr describe-images \
+            --repository-name "$ECR_REPOSITORY" \
+            --region "$AWS_REGION" \
+            --image-ids imageTag="$IMAGE_TAG" \
+            --output table
+
+
+          if [ $? -ne 0 ]; then
+
+            echo "ERROR: Image does not exist."
+
+            exit 1
+
+          fi
+
+
+          echo "Existing image validated successfully."
+
+
+      # ========================================================
+      # 12. GET IMAGE INFORMATION
+      # ========================================================
+
+      - name: Get Image Information
+
+        shell: bash
+
+        run: |
+
+          echo "=========================================="
+          echo "SELECTED IMAGE INFORMATION"
+          echo "=========================================="
+
+
+          IMAGE_DIGEST=$(aws ecr describe-images \
+            --repository-name "$ECR_REPOSITORY" \
+            --region "$AWS_REGION" \
+            --image-ids imageTag="$IMAGE_TAG" \
+            --query 'imageDetails[0].imageDigest' \
+            --output text)
+
+
+          IMAGE_PUSHED_AT=$(aws ecr describe-images \
+            --repository-name "$ECR_REPOSITORY" \
+            --region "$AWS_REGION" \
+            --image-ids imageTag="$IMAGE_TAG" \
+            --query 'imageDetails[0].imagePushedAt' \
+            --output text)
+
+
+          echo "Environment : $DEPLOY_ENV"
+          echo "Repository  : $ECR_REPOSITORY"
+          echo "Image Tag   : $IMAGE_TAG"
+          echo "Digest      : $IMAGE_DIGEST"
+          echo "Pushed At   : $IMAGE_PUSHED_AT"
+
+
+          echo "IMAGE_DIGEST=$IMAGE_DIGEST" >> "$GITHUB_ENV"
+
+
+          echo "=========================================="
+
+
+      # ========================================================
+      # 13. RENDER ECS TASK DEFINITION
+      # ========================================================
+
       - name: Render ECS Task Definition
+
         id: task-def
+
         uses: aws-actions/amazon-ecs-render-task-definition@v1
+
         with:
+
           task-definition: ${{ env.TASK_DEFINITION }}
+
           container-name: ${{ env.CONTAINER_NAME }}
+
           image: ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ env.IMAGE_TAG }}
 
 
-      # ============================================================
-      # 13. Deploy to Amazon ECS
-      # ============================================================
+      # ========================================================
+      # 14. DEPLOY TO AMAZON ECS
+      # ========================================================
+
       - name: Deploy to Amazon ECS
+
         uses: aws-actions/amazon-ecs-deploy-task-definition@v2
+
         with:
+
           task-definition: ${{ steps.task-def.outputs.task-definition }}
+
           service: ${{ env.ECS_SERVICE }}
+
           cluster: ${{ env.ECS_CLUSTER }}
+
           wait-for-service-stability: true
 
 
-      # ============================================================
-      # 14. Verify ECS Deployment
-      # ============================================================
+      # ========================================================
+      # 15. VERIFY ECS DEPLOYMENT
+      # ========================================================
+
       - name: Verify ECS Deployment
+
         shell: bash
+
         run: |
 
-          echo "=============================================="
+          echo "=========================================="
           echo "ECS DEPLOYMENT VERIFICATION"
-          echo "=============================================="
+          echo "=========================================="
+
 
           aws ecs describe-services \
             --cluster "$ECS_CLUSTER" \
@@ -388,10 +829,45 @@ jobs:
             }' \
             --output table
 
-          echo "=============================================="
-          echo "DEPLOYMENT COMPLETED SUCCESSFULLY"
-          echo "=============================================="
-          echo "Environment : $DEPLOY_ENV"
-          echo "Image       : $IMAGE_TAG"
-          echo "Service     : $ECS_SERVICE"
-          echo "=============================================="
+
+          echo "=========================================="
+          echo "DEPLOYMENT SUCCESSFUL"
+          echo "=========================================="
+
+          echo "Environment    : $DEPLOY_ENV"
+          echo "Repository     : $ECR_REPOSITORY"
+          echo "Image          : $IMAGE_TAG"
+          echo "Image Digest   : $IMAGE_DIGEST"
+          echo "ECS Service    : $ECS_SERVICE"
+
+          echo "=========================================="
+
+
+      # ========================================================
+      # 16. FINAL SUMMARY
+      # ========================================================
+
+      - name: Deployment Summary
+
+        shell: bash
+
+        run: |
+
+          echo ""
+          echo "===================================================="
+          echo "              DEPLOYMENT SUMMARY"
+          echo "===================================================="
+
+          echo "Environment       : $DEPLOY_ENV"
+          echo "Repository        : $ECR_REPOSITORY"
+          echo "Deployment Type   : ${{ github.event_name }}"
+          echo "New Image         : $BUILD_NEW_IMAGE"
+          echo "Selected Image    : $IMAGE_TAG"
+          echo "Image Digest      : $IMAGE_DIGEST"
+          echo "ECS Cluster       : $ECS_CLUSTER"
+          echo "ECS Service       : $ECS_SERVICE"
+          echo "Task Definition   : $TASK_DEFINITION"
+
+          echo "===================================================="
+          echo "Deployment completed successfully."
+          echo "===================================================="
