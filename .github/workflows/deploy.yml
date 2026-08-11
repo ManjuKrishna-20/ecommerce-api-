@@ -1,4 +1,4 @@
-name: Ecommerce CI/CD Pipeline
+name: Ecommerce Multi-Environment Deployment
 
 on:
   push:
@@ -8,22 +8,40 @@ on:
       - production
 
   workflow_dispatch:
+    inputs:
+      environment:
+        description: "Select deployment environment"
+        required: true
+        type: choice
+        options:
+          - dev
+          - qa
+          - prod
+
+permissions:
+  contents: read
 
 env:
   AWS_REGION: ap-south-1
-  ECR_REPOSITORY: ecommerce-api
   ECS_CLUSTER: ecommerce-cluster
+  CONTAINER_NAME: ecommerce-api
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
 
     steps:
-      # Checkout Repository
-      - name: Checkout Source Code
+
+      # ============================================================
+      # 1. Checkout source code
+      # ============================================================
+      - name: Checkout Repository
         uses: actions/checkout@v4
 
-      # Configure AWS Credentials
+
+      # ============================================================
+      # 2. Configure AWS credentials
+      # ============================================================
       - name: Configure AWS Credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -31,71 +49,319 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
 
-      # Login to Amazon ECR
+
+      # ============================================================
+      # 3. Login to Amazon ECR
+      # ============================================================
       - name: Login to Amazon ECR
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
 
-      # Select Environment
+
+      # ============================================================
+      # 4. Select deployment environment
+      # ============================================================
       - name: Select Environment
-        id: env
+        id: environment
+        shell: bash
         run: |
-          if [ "${GITHUB_REF_NAME}" = "dev" ]; then
-            echo "SERVICE=ecommerce-dev-service" >> $GITHUB_ENV
-            echo "TASK=ecommerce-task-dev" >> $GITHUB_ENV
-            echo "TASK_FILE=.github/workflows/task-definition-dev.json" >> $GITHUB_ENV
-
-          elif [ "${GITHUB_REF_NAME}" = "qa" ]; then
-            echo "SERVICE=ecommerce-qa-service" >> $GITHUB_ENV
-            echo "TASK=ecommerce-task-qa" >> $GITHUB_ENV
-            echo "TASK_FILE=.github/workflows/task-definition-qa.json" >> $GITHUB_ENV
-
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            DEPLOY_ENV="${{ github.event.inputs.environment }}"
           else
-            echo "SERVICE=ecommerce-prod-service" >> $GITHUB_ENV
-            echo "TASK=ecommerce-task-prod" >> $GITHUB_ENV
-            echo "TASK_FILE=.github/workflows/task-definition-prod.json" >> $GITHUB_ENV
+            case "${GITHUB_REF_NAME}" in
+              dev)
+                DEPLOY_ENV="dev"
+                ;;
+              qa)
+                DEPLOY_ENV="qa"
+                ;;
+              production)
+                DEPLOY_ENV="prod"
+                ;;
+              *)
+                echo "ERROR: Unsupported branch: ${GITHUB_REF_NAME}"
+                exit 1
+                ;;
+            esac
           fi
 
-      # Build Docker Image
+          echo "DEPLOY_ENV=$DEPLOY_ENV" >> "$GITHUB_ENV"
+          echo "environment=$DEPLOY_ENV" >> "$GITHUB_OUTPUT"
+
+          echo "======================================"
+          echo "Selected Environment: $DEPLOY_ENV"
+          echo "======================================"
+
+
+      # ============================================================
+      # 5. Select ECR repository, ECS service and task definition
+      # ============================================================
+      - name: Select Deployment Resources
+        id: resources
+        shell: bash
+        run: |
+          case "$DEPLOY_ENV" in
+
+            dev)
+              ECR_REPOSITORY="ecommerce-api-dev"
+              ECS_SERVICE="ecommerce-dev-service"
+              TASK_DEFINITION=".github/workflows/task-definition-dev.json"
+              ;;
+
+            qa)
+              ECR_REPOSITORY="ecommerce-api-qa"
+              ECS_SERVICE="ecommerce-qa-service"
+              TASK_DEFINITION=".github/workflows/task-definition-qa.json"
+              ;;
+
+            prod)
+              ECR_REPOSITORY="ecommerce-api-prod"
+              ECS_SERVICE="ecommerce-prod-service"
+              TASK_DEFINITION=".github/workflows/task-definition-prod.json"
+              ;;
+
+            *)
+              echo "ERROR: Invalid deployment environment: $DEPLOY_ENV"
+              exit 1
+              ;;
+          esac
+
+          echo "ecr_repository=$ECR_REPOSITORY" >> "$GITHUB_OUTPUT"
+          echo "ecs_service=$ECS_SERVICE" >> "$GITHUB_OUTPUT"
+          echo "task_definition=$TASK_DEFINITION" >> "$GITHUB_OUTPUT"
+
+          echo "======================================"
+          echo "Deployment Resources"
+          echo "======================================"
+          echo "Environment     : $DEPLOY_ENV"
+          echo "ECR Repository  : $ECR_REPOSITORY"
+          echo "ECS Service     : $ECS_SERVICE"
+          echo "Task Definition : $TASK_DEFINITION"
+          echo "======================================"
+
+
+      # ============================================================
+      # 6. Generate unique Docker image tag
+      # ============================================================
+      - name: Generate Image Tag
+        id: image
+        shell: bash
+        run: |
+          VERSION="1.0"
+          BUILD_NUMBER="${GITHUB_RUN_NUMBER}"
+
+          IMAGE_TAG="v${VERSION}.${BUILD_NUMBER}-${DEPLOY_ENV}-b${BUILD_NUMBER}"
+
+          echo "image_tag=$IMAGE_TAG" >> "$GITHUB_OUTPUT"
+
+          echo "======================================"
+          echo "Docker Image Tag"
+          echo "======================================"
+          echo "Environment : $DEPLOY_ENV"
+          echo "Build       : $BUILD_NUMBER"
+          echo "Image Tag   : $IMAGE_TAG"
+          echo "======================================"
+
+
+      # ============================================================
+      # 7. Build Docker image
+      # ============================================================
       - name: Build Docker Image
+        shell: bash
         run: |
           docker build \
-          -t $ECR_REPOSITORY:${GITHUB_SHA::7} .
+            -t "${{ steps.resources.outputs.ecr_repository }}:${{ steps.image.outputs.image_tag }}" \
+            .
 
-      # Tag Docker Image
+          echo "Docker image built successfully."
+
+
+      # ============================================================
+      # 8. Tag Docker image for ECR
+      # ============================================================
       - name: Tag Docker Image
+        shell: bash
         run: |
+          ECR_REGISTRY="${{ steps.login-ecr.outputs.registry }}"
+          ECR_REPOSITORY="${{ steps.resources.outputs.ecr_repository }}"
+          IMAGE_TAG="${{ steps.image.outputs.image_tag }}"
+
           docker tag \
-          $ECR_REPOSITORY:${GITHUB_SHA::7} \
-          ${{ steps.login-ecr.outputs.registry }}/$ECR_REPOSITORY:${GITHUB_SHA::7}
+            "${ECR_REPOSITORY}:${IMAGE_TAG}" \
+            "${ECR_REGISTRY}/${ECR_REPOSITORY}:${IMAGE_TAG}"
 
-      # Push Docker Image
+          echo "Docker image tagged successfully."
+
+
+      # ============================================================
+      # 9. Push Docker image to ECR
+      # ============================================================
       - name: Push Docker Image
+        id: push
+        shell: bash
         run: |
-          docker push \
-          ${{ steps.login-ecr.outputs.registry }}/$ECR_REPOSITORY:${GITHUB_SHA::7}
+          ECR_REGISTRY="${{ steps.login-ecr.outputs.registry }}"
+          ECR_REPOSITORY="${{ steps.resources.outputs.ecr_repository }}"
+          IMAGE_TAG="${{ steps.image.outputs.image_tag }}"
 
-      # Update Task Definition Image
-      - name: Render Task Definition
+          IMAGE_URI="${ECR_REGISTRY}/${ECR_REPOSITORY}:${IMAGE_TAG}"
+
+          echo "======================================"
+          echo "Pushing Docker Image"
+          echo "======================================"
+          echo "Environment : $DEPLOY_ENV"
+          echo "Repository  : $ECR_REPOSITORY"
+          echo "Image Tag   : $IMAGE_TAG"
+          echo "Image URI   : $IMAGE_URI"
+          echo "======================================"
+
+          docker push "$IMAGE_URI"
+
+          echo "image_uri=$IMAGE_URI" >> "$GITHUB_OUTPUT"
+
+          echo "Docker image pushed successfully."
+
+
+      # ============================================================
+      # 10. Verify pushed image exists in ECR
+      # ============================================================
+      - name: Verify ECR Image
+        shell: bash
+        run: |
+          ECR_REPOSITORY="${{ steps.resources.outputs.ecr_repository }}"
+          IMAGE_TAG="${{ steps.image.outputs.image_tag }}"
+
+          echo "Checking image in ECR..."
+
+          aws ecr describe-images \
+            --repository-name "$ECR_REPOSITORY" \
+            --image-ids imageTag="$IMAGE_TAG" \
+            --region "$AWS_REGION"
+
+          echo "ECR image verified successfully."
+
+
+      # ============================================================
+      # 11. Show image information
+      # ============================================================
+      - name: Show Image Information
+        shell: bash
+        run: |
+          echo "======================================"
+          echo "DEPLOYMENT IMAGE INFORMATION"
+          echo "======================================"
+          echo "Environment : $DEPLOY_ENV"
+          echo "Repository  : ${{ steps.resources.outputs.ecr_repository }}"
+          echo "Image Tag   : ${{ steps.image.outputs.image_tag }}"
+          echo "Image URI   : ${{ steps.push.outputs.image_uri }}"
+          echo "Build       : $GITHUB_RUN_NUMBER"
+          echo "======================================"
+
+
+      # ============================================================
+      # 12. Show latest 5 images from ECR
+      # ============================================================
+      - name: Show Latest 5 ECR Images
+        shell: bash
+        run: |
+          ECR_REPOSITORY="${{ steps.resources.outputs.ecr_repository }}"
+
+          echo "======================================"
+          echo "LATEST 5 ECR IMAGES"
+          echo "======================================"
+          echo "Environment : $DEPLOY_ENV"
+          echo "Repository  : $ECR_REPOSITORY"
+          echo "======================================"
+
+          aws ecr describe-images \
+            --repository-name "$ECR_REPOSITORY" \
+            --region "$AWS_REGION" \
+            --query 'reverse(sort_by(imageDetails[?imageTags != null], &imagePushedAt))[:5].[imageTags[0], imagePushedAt, imageSizeInBytes]' \
+            --output table
+
+          echo "======================================"
+
+
+      # ============================================================
+      # 13. Validate task definition JSON
+      # ============================================================
+      - name: Validate Task Definition
+        shell: bash
+        run: |
+          TASK_DEFINITION="${{ steps.resources.outputs.task_definition }}"
+
+          echo "Validating:"
+          echo "$TASK_DEFINITION"
+
+          python -m json.tool "$TASK_DEFINITION" > /dev/null
+
+          echo "Task definition JSON is valid."
+
+
+      # ============================================================
+      # 14. Render ECS task definition with new image
+      # ============================================================
+      - name: Render ECS Task Definition
         id: task-def
         uses: aws-actions/amazon-ecs-render-task-definition@v1
         with:
-          task-definition: ${{ env.TASK_FILE }}
-          container-name: ecommerce-api
-          image: ${{ steps.login-ecr.outputs.registry }}/ecommerce-api:${GITHUB_SHA::7}
+          task-definition: ${{ steps.resources.outputs.task_definition }}
+          container-name: ${{ env.CONTAINER_NAME }}
+          image: ${{ steps.push.outputs.image_uri }}
 
-      # Deploy to ECS
+
+      # ============================================================
+      # 15. Show rendered task definition
+      # ============================================================
+      - name: Show Rendered Task Definition
+        shell: bash
+        run: |
+          echo "======================================"
+          echo "RENDERED ECS TASK DEFINITION"
+          echo "======================================"
+
+          cat "${{ steps.task-def.outputs.task-definition }}"
+
+          echo "======================================"
+
+
+      # ============================================================
+      # 16. Deploy to Amazon ECS
+      # ============================================================
       - name: Deploy to Amazon ECS
         uses: aws-actions/amazon-ecs-deploy-task-definition@v2
         with:
           task-definition: ${{ steps.task-def.outputs.task-definition }}
-          service: ${{ env.SERVICE }}
-          cluster: ecommerce-cluster
+          service: ${{ steps.resources.outputs.ecs_service }}
+          cluster: ${{ env.ECS_CLUSTER }}
           wait-for-service-stability: true
 
-      # Verify Deployment
-      - name: Verify Deployment
+
+      # ============================================================
+      # 17. Verify ECS deployment
+      # ============================================================
+      - name: Verify ECS Deployment
+        shell: bash
         run: |
+          ECS_SERVICE="${{ steps.resources.outputs.ecs_service }}"
+
+          echo "======================================"
+          echo "ECS DEPLOYMENT VERIFICATION"
+          echo "======================================"
+
           aws ecs describe-services \
-          --cluster ecommerce-cluster \
-          --services $SERVICE
+            --cluster "$ECS_CLUSTER" \
+            --services "$ECS_SERVICE" \
+            --region "$AWS_REGION" \
+            --query 'services[0].{
+              Service:serviceName,
+              Status:status,
+              Running:runningCount,
+              Desired:desiredCount,
+              TaskDefinition:taskDefinition
+            }' \
+            --output table
+
+          echo "======================================"
+          echo "Deployment completed successfully."
+          echo "======================================"
