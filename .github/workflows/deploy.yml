@@ -18,11 +18,6 @@ on:
           - qa
           - prod
 
-      build_number:
-        description: "Manual build number (leave empty to use GitHub Run Number)"
-        required: false
-        type: string
-
 permissions:
   contents: read
 
@@ -33,21 +28,25 @@ env:
 
 jobs:
   deploy:
+
     runs-on: ubuntu-latest
 
+    # ============================================================
+    # Select GitHub Environment
+    # ============================================================
     environment: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.environment || (github.ref_name == 'production' && 'prod' || github.ref_name) }}
 
     steps:
 
       # ============================================================
-      # 1. Checkout source code
+      # 1. Checkout Source Code
       # ============================================================
       - name: Checkout Repository
         uses: actions/checkout@v4
 
 
       # ============================================================
-      # 2. Configure AWS credentials
+      # 2. Configure AWS Credentials
       # ============================================================
       - name: Configure AWS Credentials
         uses: aws-actions/configure-aws-credentials@v4
@@ -66,7 +65,7 @@ jobs:
 
 
       # ============================================================
-      # 4. Select Environment
+      # 4. Select Deployment Environment
       # ============================================================
       - name: Select Environment
         shell: bash
@@ -98,13 +97,17 @@ jobs:
 
           echo "DEPLOY_ENV=$ENVIRONMENT" >> "$GITHUB_ENV"
 
-          echo "======================================"
-          echo "Selected Environment : $ENVIRONMENT"
-          echo "======================================"
+          echo "=============================================="
+          echo "SELECTED ENVIRONMENT"
+          echo "=============================================="
+          echo "Environment : $ENVIRONMENT"
+          echo "Branch      : $GITHUB_REF_NAME"
+          echo "Event       : ${{ github.event_name }}"
+          echo "=============================================="
 
 
       # ============================================================
-      # 5. Select ECR + ECS resources
+      # 5. Select ECR Repository / ECS Service / Task Definition
       # ============================================================
       - name: Select Deployment Resources
         shell: bash
@@ -135,62 +138,51 @@ jobs:
 
           fi
 
-          echo "======================================"
+          echo "=============================================="
+          echo "DEPLOYMENT RESOURCES"
+          echo "=============================================="
           echo "Environment     : $DEPLOY_ENV"
           echo "ECR Repository  : $ECR_REPOSITORY"
           echo "ECS Service     : $ECS_SERVICE"
           echo "Task Definition : $TASK_DEFINITION"
-          echo "======================================"
+          echo "=============================================="
 
 
       # ============================================================
-      # 6. Generate Image Tag
+      # 6. Generate Docker Image Tag
       #
       # Format:
-      # dev-20260811-1247-b21
-      # qa-20260811-1300-b22
-      # prod-20260811-1330-b23
+      #
+      # dev-20260811-1359-b22
+      # qa-20260811-1222-b19
+      # prod-20260811-1430-b25
+      #
       # ============================================================
       - name: Generate Image Tag
         shell: bash
         run: |
 
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ github.event.inputs.build_number }}" ]; then
+          BUILD_NUMBER="${GITHUB_RUN_NUMBER}"
 
-            BUILD_NUMBER="${{ github.event.inputs.build_number }}"
+          DATE=$(date -u +"%Y%m%d")
+          TIME=$(date -u +"%H%M")
 
-          else
+          IMAGE_TAG="${DEPLOY_ENV}-${DATE}-${TIME}-b${BUILD_NUMBER}"
 
-            BUILD_NUMBER="${GITHUB_RUN_NUMBER}"
-
-          fi
-
-          # Validate build number
-          if ! [[ "$BUILD_NUMBER" =~ ^[0-9]+$ ]]; then
-            echo "ERROR: Build number must contain only numbers."
-            echo "Received: $BUILD_NUMBER"
-            exit 1
-          fi
-
-          # India Standard Time
-          BUILD_DATE=$(TZ=Asia/Kolkata date +"%Y%m%d")
-          BUILD_TIME=$(TZ=Asia/Kolkata date +"%H%M")
-
-          # Final image tag
-          IMAGE_TAG="${DEPLOY_ENV}-${BUILD_DATE}-${BUILD_TIME}-b${BUILD_NUMBER}"
-
-          echo "IMAGE_TAG=$IMAGE_TAG" >> "$GITHUB_ENV"
           echo "BUILD_NUMBER=$BUILD_NUMBER" >> "$GITHUB_ENV"
+          echo "BUILD_DATE=$DATE" >> "$GITHUB_ENV"
+          echo "BUILD_TIME=$TIME" >> "$GITHUB_ENV"
+          echo "IMAGE_TAG=$IMAGE_TAG" >> "$GITHUB_ENV"
 
-          echo "======================================"
-          echo "IMAGE VERSION"
-          echo "======================================"
+          echo "=============================================="
+          echo "DOCKER IMAGE TAG"
+          echo "=============================================="
           echo "Environment : $DEPLOY_ENV"
-          echo "Date        : $BUILD_DATE"
-          echo "Time        : $BUILD_TIME"
+          echo "Date        : $DATE"
+          echo "Time        : $TIME"
           echo "Build       : $BUILD_NUMBER"
           echo "Image Tag   : $IMAGE_TAG"
-          echo "======================================"
+          echo "=============================================="
 
 
       # ============================================================
@@ -200,24 +192,40 @@ jobs:
         shell: bash
         run: |
 
+          echo "=============================================="
+          echo "BUILDING DOCKER IMAGE"
+          echo "=============================================="
+
           docker build \
             -t "$ECR_REPOSITORY:$IMAGE_TAG" .
 
           echo "Docker image built successfully."
 
+          echo "=============================================="
+          echo "Repository : $ECR_REPOSITORY"
+          echo "Image Tag  : $IMAGE_TAG"
+          echo "=============================================="
+
 
       # ============================================================
-      # 8. Tag Docker Image
+      # 8. Tag Docker Image for ECR
       # ============================================================
       - name: Tag Docker Image
         shell: bash
         run: |
 
+          ECR_REGISTRY="${{ steps.login-ecr.outputs.registry }}"
+
           docker tag \
             "$ECR_REPOSITORY:$IMAGE_TAG" \
-            "${{ steps.login-ecr.outputs.registry }}/$ECR_REPOSITORY:$IMAGE_TAG"
+            "$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
 
-          echo "Docker image tagged successfully."
+          echo "=============================================="
+          echo "DOCKER IMAGE TAGGED"
+          echo "=============================================="
+          echo "Image URI:"
+          echo "$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
+          echo "=============================================="
 
 
       # ============================================================
@@ -227,17 +235,21 @@ jobs:
         shell: bash
         run: |
 
-          IMAGE_URI="${{ steps.login-ecr.outputs.registry }}/${ECR_REPOSITORY}:${IMAGE_TAG}"
+          ECR_REGISTRY="${{ steps.login-ecr.outputs.registry }}"
 
-          echo "======================================"
+          IMAGE_URI="$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
+
+          echo "=============================================="
           echo "PUSHING DOCKER IMAGE"
-          echo "======================================"
+          echo "=============================================="
           echo "Repository : $ECR_REPOSITORY"
           echo "Image Tag  : $IMAGE_TAG"
           echo "Image URI  : $IMAGE_URI"
-          echo "======================================"
+          echo "=============================================="
 
           docker push "$IMAGE_URI"
+
+          echo "Docker image pushed successfully."
 
 
       # ============================================================
@@ -247,39 +259,37 @@ jobs:
         shell: bash
         run: |
 
-          IMAGE_URI="${{ steps.login-ecr.outputs.registry }}/${ECR_REPOSITORY}:${IMAGE_TAG}"
+          ECR_REGISTRY="${{ steps.login-ecr.outputs.registry }}"
 
-          echo "======================================"
+          IMAGE_URI="$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
+
+          echo "=============================================="
           echo "DEPLOYMENT IMAGE INFORMATION"
-          echo "======================================"
+          echo "=============================================="
           echo "Environment : $DEPLOY_ENV"
           echo "Repository  : $ECR_REPOSITORY"
-          echo "Build       : $BUILD_NUMBER"
           echo "Image Tag   : $IMAGE_TAG"
+          echo "Build       : $BUILD_NUMBER"
+          echo "Date        : $BUILD_DATE"
+          echo "Time        : $BUILD_TIME"
           echo "Image URI   : $IMAGE_URI"
-          echo "======================================"
+          echo "=============================================="
 
 
       # ============================================================
-      # 11. Show Latest 5 Builds
+      # 11. Show Latest 5 NEW-FORMAT Builds
       #
       # IMPORTANT:
-      # Only new-format images are selected:
       #
-      # dev-YYYYMMDD-HHMM-bNUMBER
+      # This ignores old images such as:
       #
-      # Old images such as:
+      # v1.0.5-dev-b5
       # v1.0.20-dev-b20
       #
-      # are ignored.
+      # and only displays:
       #
-      # Builds are sorted numerically:
+      # dev-YYYYMMDD-HHMM-bBUILD
       #
-      # b21
-      # b20
-      # b19
-      # b18
-      # b17
       # ============================================================
       - name: Show Latest 5 Builds
         shell: bash
@@ -292,18 +302,38 @@ jobs:
           echo "Repository  : $ECR_REPOSITORY"
           echo "=============================================="
 
-          # Get all tags from ECR
           aws ecr describe-images \
             --repository-name "$ECR_REPOSITORY" \
             --region "$AWS_REGION" \
-            --query 'imageDetails[?imageTags != null].imageTags[]' \
-            --output text \
-          | tr '\t' '\n' \
-          | grep "^${DEPLOY_ENV}-[0-9]\{8\}-[0-9]\{4\}-b[0-9]\+$" \
-          | awk -F'-' '{build=substr($NF,2); print build "|" $0}' \
-          | sort -t'|' -k1,1nr \
-          | head -5 \
-          | awk -F'|' '{printf "Build %-5s %s\n", $1, $2}'
+            --output json > ecr-images.json
+
+          jq -r \
+            --arg ENV "$DEPLOY_ENV" '
+              [
+                .imageDetails[]
+                | select(.imageTags != null)
+                | . as $image
+                | $image.imageTags[]
+                | select(startswith($ENV + "-"))
+                | {
+                    tag: .,
+                    pushedAt: $image.imagePushedAt
+                  }
+              ]
+              | sort_by(.pushedAt)
+              | reverse
+              | .[:5]
+              | .[]
+              | [.tag, .pushedAt]
+              | @tsv
+            ' ecr-images.json \
+            | awk 'BEGIN {
+                printf "%-35s %-30s\n", "IMAGE TAG", "PUSHED AT"
+                printf "%-35s %-30s\n", "-----------------------------------", "------------------------------"
+              }
+              {
+                printf "%-35s %-30s\n", $1, $2
+              }'
 
           echo "=============================================="
           echo "Latest 5 builds displayed successfully."
@@ -341,9 +371,9 @@ jobs:
         shell: bash
         run: |
 
-          echo "======================================"
+          echo "=============================================="
           echo "ECS DEPLOYMENT VERIFICATION"
-          echo "======================================"
+          echo "=============================================="
 
           aws ecs describe-services \
             --cluster "$ECS_CLUSTER" \
@@ -358,6 +388,10 @@ jobs:
             }' \
             --output table
 
-          echo "======================================"
-          echo "Deployment completed successfully."
-          echo "======================================"
+          echo "=============================================="
+          echo "DEPLOYMENT COMPLETED SUCCESSFULLY"
+          echo "=============================================="
+          echo "Environment : $DEPLOY_ENV"
+          echo "Image       : $IMAGE_TAG"
+          echo "Service     : $ECS_SERVICE"
+          echo "=============================================="
